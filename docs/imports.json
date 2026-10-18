@@ -1,0 +1,17 @@
+[
+  "docs/architecture/2026-10-quality-audit-execution-plan.md",
+  "docs/features/FEAT-098-autonomous-git-commit-engine.md",
+  "docs/features/FEAT-070-speculative-stacked-branches-and-audit-pipeline.md",
+  "docs/features/FEAT-032-polyglot-speculative-drift-workflows.md",
+  "docs/features/FEAT-035-multiprovider-agent-governance.md",
+  "docs/features/FEAT-041-agent-security-quality-resilience-guardrails.md",
+  "docs/cli/commit.md",
+  "docs/cli/vcs.md",
+  "docs/cli/audit-changes.md",
+  "docs/cli/story.md",
+  "docs/cli/sync-remote.md",
+  "docs/mcp/dendrite_commit.md",
+  "docs/mcp/dendrite_vcs_guard.md",
+  "docs/mcp/dendrite_audit_changes.md",
+  "docs/mcp/dendrite_remote_sync.md"
+]
