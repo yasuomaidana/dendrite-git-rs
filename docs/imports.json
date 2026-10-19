@@ -13,5 +13,8 @@
   "docs/mcp/dendrite_commit.md",
   "docs/mcp/dendrite_vcs_guard.md",
   "docs/mcp/dendrite_audit_changes.md",
-  "docs/mcp/dendrite_remote_sync.md"
+  "docs/mcp/dendrite_remote_sync.md",
+  "docs/mcp/dendrite_story_abort.md",
+  "docs/mcp/dendrite_story_fork.md",
+  "docs/mcp/dendrite_story_resolve.md"
 ]

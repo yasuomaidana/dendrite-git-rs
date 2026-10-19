@@ -1,4 +1,4 @@
-<!-- Imported from Dendrite docs/cli/commit.md @ 69ea048 on 2026-10-18. Source of truth for this repo's scope; keep in sync with the Dendrite copy until the extraction umbrella lands. -->
+<!-- Imported from Dendrite docs/cli/commit.md @ 9cbfbeb on 2026-10-18. Source of truth for this repo's scope; keep in sync with the Dendrite copy until the extraction umbrella lands. -->
 
 ---
 id: commit
@@ -32,10 +32,13 @@ None
 | `--message` | Explicit commit message (overrides model synthesis) |
 | `--dry-run` | Preview staged changes and message without modifying git history |
 | `--no-push` | Opt out of automatic remote push |
+| `--synapse` | Also review synapse peers with uncommitted changes and offer to commit them |
+| `--yes` | With --synapse, commit every dirty peer without prompting |
 
 ## Examples
 
 ```bash
 dendrite commit --ticket DEN-985
 dendrite commit -m "feat(docs): generate cli reference docs"
+dendrite commit --synapse
 ```
