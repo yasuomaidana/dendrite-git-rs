@@ -1,0 +1,6 @@
+{
+  "identifier": "DGIT",
+  "project_id": "44728ead-d963-4c3d-a9fc-1e2d509035dd",
+  "name": "dendrite-git-rs",
+  "workspace": "dendrite-ws"
+}
