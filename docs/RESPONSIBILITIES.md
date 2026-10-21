@@ -163,25 +163,9 @@ Each relocated ticket has its own key in `DGIT`. The DEN original either is arch
 
 ---
 
-## 7. Imported Docs
+## 7. Specifications
 
-The following 15 documents in [`docs/imports.json`](imports.json) were verified in `/Users/yasuomaidana/GoLandProjects/Dendrite` and selected for import:
-
-1. `docs/architecture/2026-10-quality-audit-execution-plan.md` — Authoritative specification for Pillar 8 (Smart Commit & `--local-review`), Pillar 9 (5-repo decomposition & `dendrite pool`), and extraction milestones.
-2. `docs/features/FEAT-098-autonomous-git-commit-engine.md` — Specification for autonomous commit engine, staging management, local model delegation, and conventional commit formatting.
-3. `docs/features/FEAT-070-speculative-stacked-branches-and-audit-pipeline.md` — Specification for speculative stacked branches (`local/*`), git guardrails, degraded budget mode, and vendor LLM audit/rebase pipeline.
-4. `docs/features/FEAT-032-polyglot-speculative-drift-workflows.md` — Specification for speculative story branching in isolated git worktrees and sliced upstream commit drift reconciliation.
-5. `docs/features/FEAT-035-multiprovider-agent-governance.md` — Specification for 5-tier hierarchical git governance and branch interceptor policy matrix.
-6. `docs/features/FEAT-041-agent-security-quality-resilience-guardrails.md` — Specification for git commit security guardrails, pre-commit secret detection, and worktree isolation/rollback.
-7. `docs/cli/commit.md` — CLI reference documentation for `dendrite commit`, including `--ticket`, `--dry-run`, and `--no-push` flags.
-8. `docs/cli/vcs.md` — CLI reference documentation for `dendrite vcs`, covering branch policy enforcement, evacuation, and remote synchronization.
-9. `docs/cli/audit-changes.md` — CLI reference documentation for `dendrite audit-changes`, topological review, and rebase engine for stacked branches.
-10. `docs/cli/story.md` — CLI reference documentation for `dendrite story` subcommands (`fork`, `resolve`) using speculative git worktrees.
-11. `docs/cli/sync-remote.md` — CLI reference documentation for `dendrite sync-remote`, divergence detection, and commit reconciliation.
-12. `docs/mcp/dendrite_commit.md` — Native MCP tool specification and JSON-RPC schema for agent-invoked git commits.
-13. `docs/mcp/dendrite_vcs_guard.md` — Native MCP tool specification for Git branch guardrails and execution mode enforcement.
-14. `docs/mcp/dendrite_audit_changes.md` — Native MCP tool specification for topological vendor LLM audits and branch rebasing.
-15. `docs/mcp/dendrite_remote_sync.md` — Native MCP tool specification for remote git commit synchronization and ticket reconciliation.
+The technical specification lives in this repository: [ARCHITECTURE.md](ARCHITECTURE.md). Dendrite's CLI and MCP reference pages describe the commands Dendrite exposes on top of this repository and link here for the internals.
 
 ---
 
