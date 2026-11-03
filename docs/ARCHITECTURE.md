@@ -76,17 +76,20 @@ review/<ticket>/03-tests      stacked on 02
 
 JSON-RPC 2.0, one message per line on stdin/stdout, logs on stderr. The schemas live in `proto/*.json`, versioned with semver.
 
-| Method | Purpose |
-|---|---|
-| `health` | `{name: "dendrite-git", version, protocol}` |
-| `git.hunk_graph` | Hunks, edges and SCC units for a diff |
-| `git.cluster_hunks` | Clustered units with affinity scores |
-| `git.validate_plan` | Plan checks, including per-prefix build results |
-| `git.apply_plan` | Write the commits (or a dry run) |
-| `git.review_stack.create` / `.telemetry` / `.land` | Stacked review branches |
-| `git.divergence` | Ahead/behind and incoming commits |
-| `git.worktree.create` / `.remove` | Isolated worktrees |
-| `git.drift.analyze` | Upstream port candidates |
+### 4.1 Status
+
+| Method | Status | Purpose |
+|---|---|---|
+| `health` | implemented | `{name: "dendrite-git", version, protocol}` |
+| `git.hunks` | implemented | Pure hunk extraction from staged changes or working tree |
+| `git.hunk_graph` | not implemented yet | Hunks, edges and SCC units for a diff |
+| `git.cluster_hunks` | not implemented yet | Clustered units with affinity scores |
+| `git.validate_plan` | not implemented yet | Plan checks, including per-commit build results |
+| `git.apply_plan` | not implemented yet | Write the commits (or a dry run) |
+| `git.review_stack.create` / `.telemetry` / `.land` | not implemented yet | Stacked review branches |
+| `git.divergence` | not implemented yet | Ahead/behind and incoming commits |
+| `git.worktree.create` / `.remove` | not implemented yet | Isolated worktrees |
+| `git.drift.analyze` | not implemented yet | Upstream port candidates |
 
 ## 5. Dependencies and consumers
 
