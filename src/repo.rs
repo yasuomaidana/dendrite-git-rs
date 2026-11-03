@@ -140,8 +140,7 @@ fn collect_index_files(
 /// null id then stands in, so such a file never matches another as a rename.
 fn hash_blob(data: &[u8]) -> ObjectId {
     let kind = gix::hash::Kind::Sha1;
-    gix::objs::compute_hash(kind, gix::objs::Kind::Blob, data)
-        .unwrap_or_else(|_| ObjectId::null(kind))
+    gix::objs::compute_hash(kind, gix::objs::Kind::Blob, data).unwrap_or(ObjectId::null(kind))
 }
 
 fn extract_staged(
@@ -305,7 +304,7 @@ fn walk_worktree(
         return Ok(());
     };
     for entry in entries {
-        let entry = entry.map_err(|e| GitError::Git(e.to_string()))?;
+        let entry = entry?;
         process_worktree_entry(root, entry.path(), patterns, out)?;
     }
     Ok(())
@@ -320,9 +319,10 @@ fn process_worktree_entry(
     if path.file_name().is_some_and(|n| n == ".git") {
         return Ok(());
     }
+    // Every entry comes from listing a directory under `root`, so the prefix is always there.
     let rel_path = path
         .strip_prefix(root)
-        .map_err(|e| GitError::Git(e.to_string()))?
+        .unwrap_or(&path)
         .to_string_lossy()
         .replace('\\', "/");
     if is_path_ignored(&rel_path, patterns) {
@@ -331,7 +331,7 @@ fn process_worktree_entry(
     if path.is_dir() {
         walk_worktree(root, &path, patterns, out)?;
     } else if path.is_file() {
-        let data = fs::read(&path).map_err(|e| GitError::Git(e.to_string()))?;
+        let data = fs::read(&path)?;
         out.insert(rel_path, data);
     }
     Ok(())
@@ -340,6 +340,8 @@ fn process_worktree_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::{fixture, rstest};
+    use std::str::FromStr;
     use tempfile::TempDir;
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -362,6 +364,101 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[fixture]
+    fn git_repo() -> TempDir {
+        let repo = TempDir::new().unwrap();
+        run_git(repo.path(), &["init", "-q"]);
+        repo
+    }
+
+    #[rstest]
+    #[case("staged", Ok(Mode::Staged))]
+    #[case("STAGED", Ok(Mode::Staged))]
+    #[case("  all  ", Ok(Mode::All))]
+    #[case("ALL", Ok(Mode::All))]
+    #[case("other", Err(GitError::InvalidParams("unknown mode `other`".into())))]
+    fn mode_from_str_parsing(#[case] input: &str, #[case] expected: Result<Mode, GitError>) {
+        assert_eq!(Mode::from_str(input), expected);
+    }
+
+    #[rstest]
+    fn gitignore_filtering(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let gitignore = concat!(
+            "\n# comments and empty lines\n\n",
+            ".gitignore\n.home/\ntarget/\n*.log\n",
+            "ignored_dir/\ntemp.txt\nsub/special.env\n",
+        );
+        fs::write(dir.join(".gitignore"), gitignore).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join("target/build.txt"), "built\n").unwrap();
+        fs::create_dir_all(dir.join("nested/ignored_dir")).unwrap();
+        fs::write(dir.join("nested/ignored_dir/sub.txt"), "nested\n").unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/special.env"), "secret=1\n").unwrap();
+        fs::write(dir.join("app.log"), "log line\n").unwrap();
+        fs::write(dir.join("temp.txt"), "temp\n").unwrap();
+        fs::write(dir.join("tracked.txt"), "keep this\n").unwrap();
+
+        let hunks = extract(dir, Mode::All).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "tracked.txt");
+    }
+
+    #[rstest]
+    fn nested_directories_in_commit_and_worktree(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let nested_dir = dir.join("src/nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(nested_dir.join("file.txt"), "hello inside\n").unwrap();
+        run_git(dir, &["add", "src/nested/file.txt"]);
+        run_git(dir, &["commit", "-m", "add nested"]);
+
+        fs::write(nested_dir.join("file.txt"), "hello inside changed\n").unwrap();
+        let hunks = extract(dir, Mode::All).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "src/nested/file.txt");
+        assert_eq!(hunks[0].kind, HunkKind::Modified);
+    }
+
+    #[rstest]
+    fn staged_add_delete_and_unmodified(git_repo: TempDir) {
+        let dir = git_repo.path();
+        fs::write(dir.join("keep.txt"), "keep\n").unwrap();
+        fs::write(dir.join("del.txt"), "to delete\n").unwrap();
+        run_git(dir, &["add", "keep.txt", "del.txt"]);
+        run_git(dir, &["commit", "-m", "base"]);
+
+        run_git(dir, &["rm", "del.txt"]);
+        fs::write(dir.join("added.txt"), "new file\n").unwrap();
+        run_git(dir, &["add", "added.txt"]);
+
+        let staged = extract(dir, Mode::Staged).unwrap();
+        assert_eq!(staged.len(), 2);
+        assert_eq!(staged[0].file, "added.txt");
+        assert_eq!(staged[0].kind, HunkKind::Added);
+        assert_eq!(staged[1].file, "del.txt");
+        assert_eq!(staged[1].kind, HunkKind::Deleted);
+    }
+
+    #[rstest]
+    fn ambiguous_duplicate_renames(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let content = "identical duplicate content\n";
+        fs::write(dir.join("d1.txt"), content).unwrap();
+        fs::write(dir.join("d2.txt"), content).unwrap();
+        run_git(dir, &["add", "d1.txt", "d2.txt"]);
+        run_git(dir, &["commit", "-m", "base duplicate"]);
+
+        run_git(dir, &["rm", "d1.txt", "d2.txt"]);
+        fs::write(dir.join("a1.txt"), content).unwrap();
+        fs::write(dir.join("a2.txt"), content).unwrap();
+        run_git(dir, &["add", "a1.txt", "a2.txt"]);
+
+        let staged = extract(dir, Mode::Staged).unwrap();
+        assert_eq!(staged.len(), 4);
     }
 
     #[test]
@@ -493,5 +590,243 @@ mod tests {
         let err = extract(temp.path(), Mode::All).unwrap_err();
         assert_eq!(err.code(), -32000);
         assert_eq!(err.kind(), "not_a_repository");
+    }
+
+    #[test]
+    #[should_panic(expected = "git [\"nonexistent-git-cmd\"] failed")]
+    fn run_git_failure_panics() {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["nonexistent-git-cmd"]);
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    fn worktree_broken_symlink_ignored(git_repo: TempDir) {
+        let dir = git_repo.path();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling_link")).unwrap();
+        assert!(extract(dir, Mode::All).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    fn worktree_unreadable_dir_handled(git_repo: TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = git_repo.path();
+        let unreadable = dir.join("cant_read_dir");
+        fs::create_dir(&unreadable).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert!(extract(dir, Mode::All).unwrap().is_empty());
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    fn worktree_unreadable_file_propagates_error(git_repo: TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = git_repo.path();
+        let unreadable = dir.join("cant_read_file.txt");
+        fs::write(&unreadable, "data\n").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert!(matches!(extract(dir, Mode::All), Err(GitError::Git(_))));
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[rstest]
+    fn commit_tree_with_submodule_entry(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let sha = "1111111111111111111111111111111111111111";
+        run_git(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                sha,
+                "submod",
+            ],
+        );
+        run_git(dir, &["commit", "-m", "add submodule entry"]);
+
+        assert!(extract(dir, Mode::All).unwrap().is_empty());
+    }
+
+    #[rstest]
+    fn staged_index_with_missing_object_handled(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let sha = "2222222222222222222222222222222222222222";
+        run_git(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                sha,
+                "ghost.txt",
+            ],
+        );
+
+        let staged = extract(dir, Mode::Staged).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].file, "ghost.txt");
+        assert_eq!(staged[0].kind, HunkKind::Added);
+    }
+
+    #[rstest]
+    fn head_pointing_to_tree_object_handled(git_repo: TempDir) {
+        let dir = git_repo.path();
+        run_git(dir, &["commit", "--allow-empty", "-m", "empty"]);
+
+        let repo = gix::open(dir).unwrap();
+        let tree_id = repo.head_commit().unwrap().tree_id().unwrap();
+        // git refuses to point a branch at a tree; a detached HEAD file can name any object.
+        fs::write(dir.join(".git/HEAD"), format!("{tree_id}\n")).unwrap();
+
+        assert!(extract(dir, Mode::All).unwrap().is_empty());
+    }
+
+    #[rstest]
+    fn head_commit_missing_tree_handled(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let file = dir.join("solo.txt");
+        fs::write(&file, "content\n").unwrap();
+        run_git(dir, &["add", "solo.txt"]);
+        run_git(dir, &["commit", "-m", "solo"]);
+
+        let repo = gix::open(dir).unwrap();
+        let tree_id = repo.head_commit().unwrap().tree_id().unwrap().to_string();
+        let (prefix, suffix) = tree_id.split_at(2);
+        let tree_path = dir.join(".git/objects").join(prefix).join(suffix);
+        fs::remove_file(tree_path).unwrap();
+
+        let hunks = extract(dir, Mode::All).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, "solo.txt");
+    }
+
+    fn object_path(dir: &Path, hex: &str) -> PathBuf {
+        dir.join(".git/objects").join(&hex[..2]).join(&hex[2..])
+    }
+
+    #[rstest]
+    #[case::head(".git/HEAD", b"malformed-head-ref\n".as_slice(), Mode::All)]
+    #[case::index(".git/index", b"bad-index-data".as_slice(), Mode::Staged)]
+    fn corrupted_git_state_fails_with_git_error(
+        git_repo: TempDir,
+        #[case] file: &str,
+        #[case] bytes: &[u8],
+        #[case] mode: Mode,
+    ) {
+        let dir = git_repo.path();
+        fs::write(dir.join(file), bytes).unwrap();
+        let err = extract(dir, mode).unwrap_err();
+        assert_eq!(err.code(), -32000);
+        assert_eq!(err.kind(), "git_error");
+    }
+
+    #[rstest]
+    #[case(true)]
+    #[case(false)]
+    fn commit_missing_tree_entry_object_fails(git_repo: TempDir, #[case] test_tree: bool) {
+        let dir = git_repo.path();
+        let sub = dir.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("inner.txt"), "nested\n").unwrap();
+        fs::write(dir.join("outer.txt"), "root\n").unwrap();
+        run_git(dir, &["add", "sub/inner.txt", "outer.txt"]);
+        run_git(dir, &["commit", "-m", "mixed"]);
+
+        let repo = gix::open(dir).unwrap();
+        let tree = repo.head_commit().unwrap().tree().unwrap();
+        let decoded = tree.decode().unwrap();
+        let entry = decoded
+            .entries
+            .into_iter()
+            .find(|e| {
+                if test_tree {
+                    e.mode.is_tree()
+                } else {
+                    e.mode.is_blob()
+                }
+            })
+            .unwrap();
+        fs::remove_file(object_path(dir, &entry.oid.to_string())).unwrap();
+
+        assert!(matches!(extract(dir, Mode::All), Err(GitError::Git(_))));
+    }
+
+    #[rstest]
+    fn commit_corrupt_tree_object_fails(git_repo: TempDir) {
+        let dir = git_repo.path();
+        fs::write(dir.join("doc.txt"), "some text\n").unwrap();
+        run_git(dir, &["add", "doc.txt"]);
+        run_git(dir, &["commit", "-m", "initial"]);
+
+        let repo = gix::open(dir).unwrap();
+        let real_tree_id = repo.head_commit().unwrap().tree_id().unwrap();
+
+        fs::write(dir.join("corrupt_raw"), "malformed tree entry bytes\n").unwrap();
+        run_git(
+            dir,
+            &[
+                "hash-object",
+                "-w",
+                "-t",
+                "tree",
+                "--literally",
+                "corrupt_raw",
+            ],
+        );
+        let bad_tree_id = gix::objs::compute_hash(
+            gix::hash::Kind::Sha1,
+            gix::objs::Kind::Tree,
+            b"malformed tree entry bytes\n",
+        )
+        .unwrap();
+
+        // git stores objects read-only; replace the real tree with the malformed one.
+        let real_path = object_path(dir, &real_tree_id.to_string());
+        fs::remove_file(&real_path).unwrap();
+        fs::copy(object_path(dir, &bad_tree_id.to_string()), &real_path).unwrap();
+
+        assert!(matches!(extract(dir, Mode::All), Err(GitError::Git(_))));
+    }
+
+    #[rstest]
+    fn single_deleted_multiple_added_no_rename(git_repo: TempDir) {
+        let repo_root = git_repo.path();
+        let source_file = repo_root.join("source.txt");
+        fs::write(&source_file, "payload\n").unwrap();
+        run_git(repo_root, &["add", "source.txt"]);
+        run_git(repo_root, &["commit", "-m", "init source"]);
+
+        fs::remove_file(&source_file).unwrap();
+        for name in ["dup1.txt", "dup2.txt"] {
+            fs::write(repo_root.join(name), "payload\n").unwrap();
+        }
+        run_git(repo_root, &["add", "-A"]);
+
+        let res = extract(repo_root, Mode::Staged).unwrap();
+        assert_eq!(res.len(), 3);
+        assert!(!res.iter().any(|h| matches!(h.kind, HunkKind::Renamed(_))));
+    }
+
+    #[rstest]
+    fn gitignore_nested_path_matching(git_repo: TempDir) {
+        let dir = git_repo.path();
+        fs::write(dir.join(".gitignore"), "leaf.txt\n").unwrap();
+        let sub = dir.join("deep/sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("leaf.txt"), "ignored leaf\n").unwrap();
+        fs::write(sub.join("other.txt"), "included other\n").unwrap();
+
+        let hunks = extract(dir, Mode::All).unwrap();
+        assert!(hunks.iter().all(|h| h.file != "deep/sub/leaf.txt"));
+        assert!(hunks.iter().any(|h| h.file == "deep/sub/other.txt"));
     }
 }

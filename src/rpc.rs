@@ -135,6 +135,16 @@ mod tests {
     #[rstest]
     #[case::unknown_method(r#"{"jsonrpc":"2.0","id":2,"method":"unknown.method"}"#, -32601)]
     #[case::invalid_json("{not valid json}", -32700)]
+    #[case::missing_method(r#"{"jsonrpc":"2.0","id":6,"params":{}}"#, -32600)]
+    #[case::bad_params_structure(
+        r#"{"jsonrpc":"2.0","id":7,"method":"git.hunks","params":"not_object"}"#,
+        -32602
+    )]
+    #[case::non_string_method(r#"{"jsonrpc":"2.0","id":13,"method":999}"#, -32600)]
+    #[case::missing_required_param(
+        r#"{"jsonrpc":"2.0","id":14,"method":"git.hunks","params":{"repo":"/tmp"}}"#,
+        -32602
+    )]
     fn errors_carry_their_json_rpc_code(#[case] line: &str, #[case] code: i64) {
         let response_str = handle_line(line).expect("expected response");
         let val: Value = serde_json::from_str(&response_str).unwrap();
@@ -180,5 +190,102 @@ mod tests {
         serve(input.as_bytes(), &mut output).unwrap();
         let out_str = String::from_utf8(output).unwrap();
         assert!(out_str.contains(r#""name":"dendrite-git""#));
+    }
+
+    #[test]
+    fn serve_ignores_empty_or_whitespace_lines() {
+        let mut output = Vec::new();
+        serve("  \n\n".as_bytes(), &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[rstest]
+    #[case(vec!["dendrite-git".into(), "--version".into()], "", 0, "dendrite-git ")]
+    #[case(vec!["dendrite-git".into()], "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"health\"}\n", 0, "")]
+    fn run_exit_codes(
+        #[case] args: Vec<String>,
+        #[case] input: &str,
+        #[case] expected_code: i32,
+        #[case] expected_err: &str,
+    ) {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(&args, input.as_bytes(), &mut out, &mut err);
+        assert_eq!(code, expected_code);
+        let err_str = String::from_utf8(err).unwrap();
+        assert!(err_str.contains(expected_err));
+    }
+
+    #[test]
+    fn run_fails_on_output_error() {
+        let mut zero_buf = [0u8; 0];
+        let mut err = Vec::new();
+        let req = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"health\"}\n";
+        let args = [String::from("dendrite-git")];
+        let code = run(&args, req.as_bytes(), &mut zero_buf[..], &mut err);
+        assert_eq!(code, 1);
+        assert!(String::from_utf8(err).unwrap().starts_with("dendrite-git:"));
+    }
+
+    #[test]
+    fn git_hunks_success_returns_hunks() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        gix::init(dir).unwrap();
+        std::fs::write(dir.join("live.txt"), "content\n").unwrap();
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":11,"method":"git.hunks","params":{{"repo":"{}","mode":"all"}}}}"#,
+            dir.display()
+        );
+        let resp = handle_line(&line).expect("expected response");
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(val["id"], 11);
+        let hunks = val["result"]["hunks"].as_array().unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["file"], "live.txt");
+    }
+
+    #[test]
+    fn git_hunks_git_error_returns_32000() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        gix::init(dir).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "broken-ref\n").unwrap();
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":12,"method":"git.hunks","params":{{"repo":"{}","mode":"all"}}}}"#,
+            dir.display()
+        );
+        let resp = handle_line(&line).expect("expected response");
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(val["error"]["code"], -32000);
+        assert_eq!(val["error"]["data"]["kind"], "git_error");
+    }
+
+    #[test]
+    fn serve_handles_notifications_silently() {
+        let mut output = Vec::new();
+        let notification = r#"{"jsonrpc":"2.0","method":"health"}"#;
+        serve(format!("{notification}\n").as_bytes(), &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn run_invalid_utf8_input_fails() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let args = [String::from("dendrite-git")];
+        let code = run(&args, &b"\xff\xff\n"[..], &mut out, &mut err);
+        assert_eq!(code, 1);
+        assert!(String::from_utf8(err).unwrap().starts_with("dendrite-git:"));
+    }
+
+    #[test]
+    fn run_non_version_arg_serves_input() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let args = [String::from("dendrite-git"), String::from("--check")];
+        let req = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"health\"}\n";
+        let code = run(&args, req.as_bytes(), &mut out, &mut err);
+        assert_eq!(code, 0);
     }
 }

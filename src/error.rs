@@ -15,6 +15,12 @@ pub enum GitError {
     MethodNotFound(String),
 }
 
+impl From<std::io::Error> for GitError {
+    fn from(e: std::io::Error) -> Self {
+        GitError::Git(e.to_string())
+    }
+}
+
 impl GitError {
     /// JSON-RPC error code: -32601 for an unknown method, -32602 for bad input, -32000 for an operation that failed.
     pub fn code(&self) -> i64 {

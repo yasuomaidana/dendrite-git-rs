@@ -279,6 +279,69 @@ mod tests {
         Some(b"trailing".as_slice()),
         vec![change(HunkKind::Modified, &["trailing"], &["trailing\n"])]
     )]
+    #[case(
+        "both_none",
+        "f.txt",
+        None,
+        None,
+        vec![]
+    )]
+    #[case(
+        "add_empty_file",
+        "f.txt",
+        None,
+        Some(b"".as_slice()),
+        vec![change(HunkKind::Added, &[], &[])]
+    )]
+    #[case(
+        "delete_empty_file",
+        "f.txt",
+        Some(b"".as_slice()),
+        None,
+        vec![change(HunkKind::Deleted, &[], &[])]
+    )]
+    #[case(
+        "lossy_utf8_identical",
+        "f.txt",
+        Some(b"\xff".as_slice()),
+        Some(b"\xfe".as_slice()),
+        vec![]
+    )]
+    #[case(
+        "binary_added",
+        "f.bin",
+        None,
+        Some(b"hello\0bin".as_slice()),
+        vec![change(HunkKind::Binary, &[], &[])]
+    )]
+    #[case(
+        "binary_deleted",
+        "f.bin",
+        Some(b"hello\0bin".as_slice()),
+        None,
+        vec![change(HunkKind::Binary, &[], &[])]
+    )]
+    #[case(
+        "text_to_binary",
+        "f.bin",
+        Some(b"hello text".as_slice()),
+        Some(b"hello\0bin".as_slice()),
+        vec![change(HunkKind::Binary, &[], &[])]
+    )]
+    #[case(
+        "add_file_without_trailing_newline",
+        "f.txt",
+        None,
+        Some(b"first\nsecond".as_slice()),
+        vec![change(HunkKind::Added, &["first\n", "second"], &[])]
+    )]
+    #[case(
+        "delete_file_without_trailing_newline",
+        "f.txt",
+        Some(b"first\nsecond".as_slice()),
+        None,
+        vec![change(HunkKind::Deleted, &[], &["first\n", "second"])]
+    )]
     fn diff_file_scenarios(
         #[case] _name: &str,
         #[case] file: &str,
@@ -298,18 +361,75 @@ mod tests {
 
     #[test]
     fn numbering_assigns_ids_in_path_order_then_position() {
-        let mut hunks = vec![hunk("b.txt", 10), hunk("a.txt", 20), hunk("a.txt", 5)];
+        let mut h1 = hunk("a.txt", 5);
+        h1.old_start = 10;
+        let mut h2 = hunk("a.txt", 5);
+        h2.old_start = 2;
+        let mut hunks = vec![hunk("b.txt", 10), hunk("a.txt", 20), h1, h2];
         number(&mut hunks);
         assert_eq!(hunks[0].id, 1);
         assert_eq!(hunks[0].file, "a.txt");
         assert_eq!(hunks[0].new_start, 5);
+        assert_eq!(hunks[0].old_start, 2);
 
         assert_eq!(hunks[1].id, 2);
         assert_eq!(hunks[1].file, "a.txt");
-        assert_eq!(hunks[1].new_start, 20);
+        assert_eq!(hunks[1].new_start, 5);
+        assert_eq!(hunks[1].old_start, 10);
 
         assert_eq!(hunks[2].id, 3);
-        assert_eq!(hunks[2].file, "b.txt");
-        assert_eq!(hunks[2].new_start, 10);
+        assert_eq!(hunks[2].file, "a.txt");
+        assert_eq!(hunks[2].new_start, 20);
+
+        assert_eq!(hunks[3].id, 4);
+        assert_eq!(hunks[3].file, "b.txt");
+        assert_eq!(hunks[3].new_start, 10);
+    }
+
+    #[test]
+    fn split_lines_empty_returns_empty_vec() {
+        assert!(split_lines("").is_empty());
+    }
+
+    #[rstest]
+    #[case("alpha\nbeta", vec!["alpha\n", "beta"])]
+    #[case("single", vec!["single"])]
+    fn split_lines_without_trailing_newline(#[case] text: &str, #[case] expected: Vec<&str>) {
+        assert_eq!(split_lines(text), expected);
+    }
+
+    #[test]
+    fn hunk_serialization_round_trip() {
+        let hunk = Hunk {
+            id: 1,
+            file: "renamed.txt".into(),
+            old_start: 0,
+            old_lines: 0,
+            new_start: 0,
+            new_lines: 0,
+            added: vec![],
+            removed: vec![],
+            kind: HunkKind::Renamed("original.txt".into()),
+        };
+        let serialized = serde_json::to_string(&hunk).unwrap();
+        let deserialized: Hunk = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(hunk, deserialized);
+    }
+
+    #[test]
+    fn is_binary_with_large_slice() {
+        let mut large = vec![b'a'; 10000];
+        assert!(!is_binary(&large));
+        large[8000] = 0;
+        assert!(!is_binary(&large));
+        large[100] = 0;
+        assert!(is_binary(&large));
+    }
+
+    #[test]
+    fn number_empty_slice() {
+        let mut hunks: Vec<Hunk> = Vec::new();
+        number(&mut hunks);
+        assert!(hunks.is_empty());
     }
 }
