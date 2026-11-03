@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -28,28 +27,6 @@ fn run(args: &[&str], stdin: &str) -> (String, String, bool) {
     )
 }
 
-fn run_git(dir: &Path, args: &[&str]) {
-    let temp_home = dir.join(".home");
-    let _ = fs::create_dir_all(&temp_home);
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("HOME", &temp_home)
-        .env("GIT_CONFIG_GLOBAL", temp_home.join(".gitconfig"))
-        .env("GIT_AUTHOR_NAME", "Dendrite Test")
-        .env("GIT_AUTHOR_EMAIL", "test@dendrite.dev")
-        .env("GIT_COMMITTER_NAME", "Dendrite Test")
-        .env("GIT_COMMITTER_EMAIL", "test@dendrite.dev")
-        .output()
-        .expect("git CLI command failed to spawn");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[test]
 fn prints_its_version() {
     let (_, err, ok) = run(&["--version"], "");
@@ -72,7 +49,7 @@ fn answers_health_request() {
 fn answers_git_hunks_request() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
-    run_git(dir, &["init"]);
+    gix::init(dir).unwrap();
     fs::write(dir.join("sample.txt"), "hello world\n").unwrap();
 
     let request = format!(
