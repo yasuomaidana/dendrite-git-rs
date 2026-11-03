@@ -87,17 +87,26 @@ Error Responses:
 
 ## Rust Library (`dendrite_git`)
 
-```rust
+```rust,no_run
 use std::path::Path;
-use dendrite_git::{diff_file, extract, Mode};
+use dendrite_git::{extract, GitError, Mode};
 
-// In-process Git extraction without spawning git CLI:
-let hunks = extract(Path::new("."), Mode::Staged)?;
+fn main() -> Result<(), GitError> {
+    // In-process Git extraction without spawning the git CLI:
+    let staged = extract(Path::new("."), Mode::Staged)?;
+    println!("{} staged hunks", staged.len());
+    Ok(())
+}
+```
+
+```rust
+use dendrite_git::diff_file;
 
 // Pure line diffing without Git:
 let old = b"line 1\nline 2\n";
 let new = b"line 1\nline 2 modified\n";
 let hunks = diff_file("test.txt", Some(old), Some(new));
+assert_eq!(hunks.len(), 1);
 ```
 
 ## Testing & Quality Gates
