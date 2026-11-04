@@ -1,8 +1,8 @@
 //! In-process Git repository inspection using gitoxide (gix).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gix::ObjectId;
 
@@ -51,14 +51,29 @@ fn extract_all_worktree(
     head_files: BTreeMap<String, (ObjectId, Vec<u8>)>,
 ) -> Result<Vec<Hunk>, GitError> {
     let worktree_dir = repo.workdir().unwrap_or(repo_path);
-    let ignore_patterns = read_ignore_patterns(worktree_dir);
+    let index = repo
+        .index_or_empty()
+        .map_err(|e| GitError::Git(e.to_string()))?;
+    let excludes = repo
+        .excludes(
+            &index,
+            None,
+            gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+        )
+        .map_err(|e| GitError::Git(e.to_string()))?;
+    // Ignore rules never apply to a path Git already tracks, in HEAD or in the index.
+    let tracked: BTreeSet<String> = head_files
+        .keys()
+        .cloned()
+        .chain(index.entries().iter().map(|e| e.path(&index).to_string()))
+        .collect();
     let mut worktree_files = BTreeMap::new();
-    walk_worktree(
-        worktree_dir,
-        worktree_dir,
-        &ignore_patterns,
-        &mut worktree_files,
-    )?;
+    Scanner {
+        root: worktree_dir,
+        excludes,
+        tracked,
+    }
+    .walk(worktree_dir, &mut worktree_files)?;
     Ok(extract_all(head_files, worktree_files))
 }
 
@@ -263,84 +278,83 @@ fn detect_renames_and_diff(
     }
 }
 
-fn read_ignore_patterns(root: &Path) -> Vec<String> {
-    let mut patterns = Vec::new();
-    let gitignore_path = root.join(".gitignore");
-    if let Ok(content) = fs::read_to_string(gitignore_path) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                patterns.push(trimmed.to_string());
-            }
+/// Walks the working tree the way `git status` does: symlinks are never followed (a link is
+/// its own blob in Git, and following one could read outside the repository or loop), and the
+/// exclude rules come from Git itself (nested `.gitignore`, negation, anchoring, `**`,
+/// `.git/info/exclude` and `core.excludesFile`). Tracked paths are never excluded.
+struct Scanner<'a> {
+    root: &'a Path,
+    excludes: gix::AttributeStack<'a>,
+    tracked: BTreeSet<String>,
+}
+
+impl Scanner<'_> {
+    fn walk(&mut self, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<(), GitError> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for entry in entries {
+            let entry = entry?;
+            self.visit(&entry.path(), out)?;
         }
+        Ok(())
     }
-    patterns
-}
 
-fn pattern_matches(rel_path: &str, pat: &str) -> bool {
-    if pat.ends_with('/') {
-        let dir_pat = pat.trim_end_matches('/');
-        rel_path == dir_pat
-            || rel_path.starts_with(&format!("{dir_pat}/"))
-            || rel_path.split('/').any(|segment| segment == dir_pat)
-    } else if let Some(ext) = pat.strip_prefix("*.") {
-        rel_path.ends_with(&format!(".{ext}"))
-    } else {
-        rel_path == pat || rel_path.ends_with(&format!("/{pat}"))
+    fn visit(&mut self, path: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<(), GitError> {
+        if path.file_name().is_some_and(|n| n == ".git") {
+            return Ok(());
+        }
+        // `symlink_metadata` does not follow links: a link is skipped, whatever it points at.
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return Ok(());
+        };
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        // Every entry comes from listing a directory under `root`, so the prefix is always there.
+        let rel_path = path
+            .strip_prefix(self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if meta.is_dir() {
+            if !self.is_ignored(&rel_path, true) {
+                self.walk(path, out)?;
+            }
+        } else if meta.is_file() && !self.is_ignored(&rel_path, false) {
+            out.insert(rel_path, fs::read(path)?);
+        }
+        Ok(())
     }
-}
 
-fn is_path_ignored(rel_path: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pat| pattern_matches(rel_path, pat))
-}
-
-fn walk_worktree(
-    root: &Path,
-    dir: &Path,
-    patterns: &[String],
-    out: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), GitError> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries {
-        let entry = entry?;
-        process_worktree_entry(root, entry.path(), patterns, out)?;
+    /// Whether Git's exclude rules hide `rel_path`. A tracked file, or a directory holding one,
+    /// is never hidden: ignore rules only apply to untracked paths.
+    fn is_ignored(&mut self, rel_path: &str, is_dir: bool) -> bool {
+        let tracked = if is_dir {
+            let prefix = format!("{rel_path}/");
+            self.tracked.iter().any(|k| k.starts_with(&prefix))
+        } else {
+            self.tracked.contains(rel_path)
+        };
+        if tracked {
+            return false;
+        }
+        let mode = if is_dir {
+            gix::index::entry::Mode::DIR
+        } else {
+            gix::index::entry::Mode::FILE
+        };
+        self.excludes
+            .at_path(rel_path, Some(mode))
+            .is_ok_and(|platform| platform.is_excluded())
     }
-    Ok(())
-}
-
-fn process_worktree_entry(
-    root: &Path,
-    path: PathBuf,
-    patterns: &[String],
-    out: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), GitError> {
-    if path.file_name().is_some_and(|n| n == ".git") {
-        return Ok(());
-    }
-    // Every entry comes from listing a directory under `root`, so the prefix is always there.
-    let rel_path = path
-        .strip_prefix(root)
-        .unwrap_or(&path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    if is_path_ignored(&rel_path, patterns) {
-        return Ok(());
-    }
-    if path.is_dir() {
-        walk_worktree(root, &path, patterns, out)?;
-    } else if path.is_file() {
-        let data = fs::read(&path)?;
-        out.insert(rel_path, data);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::{fixture, rstest};
+    use std::path::PathBuf;
     use std::str::FromStr;
     use tempfile::TempDir;
 
@@ -828,5 +842,84 @@ mod tests {
         let hunks = extract(dir, Mode::All).unwrap();
         assert!(hunks.iter().all(|h| h.file != "deep/sub/leaf.txt"));
         assert!(hunks.iter().any(|h| h.file == "deep/sub/other.txt"));
+    }
+
+    /// The untracked files `extract` reports, which must equal `git ls-files --others --exclude-standard`.
+    fn reported(dir: &Path) -> Vec<String> {
+        let mut files: Vec<String> = extract(dir, Mode::All)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.file)
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    fn git_untracked(dir: &Path) -> Vec<String> {
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(dir)
+            .env("HOME", dir.join(".home"))
+            .env("GIT_CONFIG_GLOBAL", dir.join(".home/.gitconfig"))
+            .output()
+            .unwrap();
+        let mut files: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[rstest]
+    #[case::nested_gitignore(&[("sub/.gitignore", "inner.txt\n"), ("sub/inner.txt", "x\n"), ("inner.txt", "y\n")])]
+    #[case::negation(&[(".gitignore", "*.log\n!keep.log\n"), ("a.log", "x\n"), ("keep.log", "y\n")])]
+    #[case::anchored(&[(".gitignore", "/top.txt\n"), ("top.txt", "x\n"), ("d/top.txt", "y\n")])]
+    #[case::double_star(&[(".gitignore", "**/gen/*.rs\n"), ("a/gen/x.rs", "x\n"), ("a/y.rs", "y\n")])]
+    #[case::info_exclude(&[(".git/info/exclude", "local.txt\n"), ("local.txt", "x\n"), ("shared.txt", "y\n")])]
+    #[case::glob_prefix_only(&[(".gitignore", "*.log\n"), (".log", "x\n"), ("a.log", "y\n")])]
+    fn untracked_files_match_git(git_repo: TempDir, #[case] files: &[(&str, &str)]) {
+        let dir = git_repo.path();
+        fs::write(dir.join(".git/info/exclude"), "/.home/\n").unwrap();
+        for (path, content) in files {
+            let target = dir.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            if *path == ".git/info/exclude" {
+                fs::write(&target, format!("/.home/\n{content}")).unwrap();
+            } else {
+                fs::write(&target, content).unwrap();
+            }
+        }
+        assert_eq!(reported(dir), git_untracked(dir));
+    }
+
+    #[rstest]
+    fn tracked_files_stay_visible_when_a_rule_matches_them(git_repo: TempDir) {
+        let dir = git_repo.path();
+        fs::write(dir.join(".git/info/exclude"), "/.home/\n").unwrap();
+        fs::write(dir.join("a.log"), "one\n").unwrap();
+        run_git(dir, &["add", "-f", "a.log"]);
+        run_git(dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(dir.join("a.log"), "two\n").unwrap();
+        assert!(reported(dir).contains(&"a.log".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    fn symlinks_are_never_followed(git_repo: TempDir) {
+        use std::os::unix::fs::symlink;
+        let dir = git_repo.path();
+        fs::write(dir.join(".git/info/exclude"), "/.home/\n").unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "top secret\n").unwrap();
+        symlink(outside.path().join("secret.txt"), dir.join("leak_file")).unwrap();
+        symlink(outside.path(), dir.join("leak_dir")).unwrap();
+        symlink(dir, dir.join("loop")).unwrap();
+        fs::write(dir.join("real.txt"), "real\n").unwrap();
+
+        assert_eq!(reported(dir), vec!["real.txt".to_string()]);
     }
 }
