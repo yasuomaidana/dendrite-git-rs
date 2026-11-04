@@ -45,22 +45,24 @@ pub fn extract(repo_path: &Path, mode: Mode) -> Result<Vec<Hunk>, GitError> {
     Ok(hunks)
 }
 
+fn git_error(e: impl std::fmt::Display) -> GitError {
+    GitError::Git(e.to_string())
+}
+
 fn extract_all_worktree(
     repo: &gix::Repository,
     repo_path: &Path,
     head_files: BTreeMap<String, (ObjectId, Vec<u8>)>,
 ) -> Result<Vec<Hunk>, GitError> {
     let worktree_dir = repo.workdir().unwrap_or(repo_path);
-    let index = repo
-        .index_or_empty()
-        .map_err(|e| GitError::Git(e.to_string()))?;
+    let index = repo.index_or_empty().map_err(git_error)?;
     let excludes = repo
         .excludes(
             &index,
             None,
             gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
         )
-        .map_err(|e| GitError::Git(e.to_string()))?;
+        .map_err(git_error)?;
     // Ignore rules never apply to a path Git already tracks, in HEAD or in the index.
     let tracked: BTreeSet<String> = head_files
         .keys()
@@ -304,13 +306,14 @@ impl Scanner<'_> {
         if path.file_name().is_some_and(|n| n == ".git") {
             return Ok(());
         }
-        // `symlink_metadata` does not follow links: a link is skipped, whatever it points at.
-        let Ok(meta) = fs::symlink_metadata(path) else {
+        // `symlink_metadata` does not follow links: a link is skipped, whatever it points at, and
+        // so is an entry that vanished since the directory was listed.
+        let Some(meta) = fs::symlink_metadata(path)
+            .ok()
+            .filter(|m| !m.file_type().is_symlink())
+        else {
             return Ok(());
         };
-        if meta.file_type().is_symlink() {
-            return Ok(());
-        }
         // Every entry comes from listing a directory under `root`, so the prefix is always there.
         let rel_path = path
             .strip_prefix(self.root)
@@ -730,6 +733,7 @@ mod tests {
     #[rstest]
     #[case::head(".git/HEAD", b"malformed-head-ref\n".as_slice(), Mode::All)]
     #[case::index(".git/index", b"bad-index-data".as_slice(), Mode::Staged)]
+    #[case::index_in_all_mode(".git/index", b"bad-index-data".as_slice(), Mode::All)]
     fn corrupted_git_state_fails_with_git_error(
         git_repo: TempDir,
         #[case] file: &str,
