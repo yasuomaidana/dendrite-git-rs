@@ -85,11 +85,9 @@ fn collect_head_files(
     let mut head_files = BTreeMap::new();
     let head = repo.head().map_err(|e| GitError::Git(e.to_string()))?;
     if !head.is_unborn() {
-        if let Ok(commit) = repo.head_commit() {
-            if let Ok(tree) = commit.tree() {
-                collect_tree_entries(repo, &tree, "", &mut head_files)?;
-            }
-        }
+        let commit = repo.head_commit().map_err(git_error)?;
+        let tree = commit.tree().map_err(git_error)?;
+        collect_tree_entries(repo, &tree, "", &mut head_files)?;
     }
     Ok(head_files)
 }
@@ -141,16 +139,29 @@ fn collect_index_files(
         .index_or_empty()
         .map_err(|e| GitError::Git(e.to_string()))?;
     let mut index_files = BTreeMap::new();
+    let mut unmerged = BTreeSet::new();
     for entry in index.entries() {
         let path = entry.path(&index).to_string();
-        let oid = entry.id;
-        let blob_data = match repo.find_object(oid) {
-            Ok(obj) => obj.data.to_vec(),
-            Err(_) => Vec::new(),
-        };
-        index_files.insert(path, (oid, blob_data));
+        if entry.flags.stage_raw() != 0 {
+            unmerged.insert(path);
+        } else if is_regular_file(entry.mode) {
+            let blob = repo.find_object(entry.id).map_err(git_error)?;
+            index_files.insert(path, (entry.id, blob.data.to_vec()));
+        }
+    }
+    if !unmerged.is_empty() {
+        let paths: Vec<String> = unmerged.into_iter().collect();
+        return Err(GitError::Git(format!(
+            "unmerged paths: {}",
+            paths.join(", ")
+        )));
     }
     Ok(index_files)
+}
+
+/// Symlinks and submodules (gitlinks) are not file contents; HEAD collection skips them too.
+fn is_regular_file(mode: gix::index::entry::Mode) -> bool {
+    mode == gix::index::entry::Mode::FILE || mode == gix::index::entry::Mode::FILE_EXECUTABLE
 }
 
 /// The git blob id of `data`. Hashing fails only when SHA-1 collision detection fires on crafted input; the
@@ -673,7 +684,7 @@ mod tests {
     }
 
     #[rstest]
-    fn staged_index_with_missing_object_handled(git_repo: TempDir) {
+    fn staged_index_with_missing_object_fails(git_repo: TempDir) {
         let dir = git_repo.path();
         let sha = "2222222222222222222222222222222222222222";
         run_git(
@@ -688,14 +699,68 @@ mod tests {
             ],
         );
 
-        let staged = extract(dir, Mode::Staged).unwrap();
-        assert_eq!(staged.len(), 1);
-        assert_eq!(staged[0].file, "ghost.txt");
-        assert_eq!(staged[0].kind, HunkKind::Added);
+        assert!(matches!(extract(dir, Mode::Staged), Err(GitError::Git(_))));
     }
 
     #[rstest]
-    fn head_pointing_to_tree_object_handled(git_repo: TempDir) {
+    fn staged_skips_committed_symlink_and_submodule(git_repo: TempDir) {
+        let dir = git_repo.path();
+        fs::write(dir.join("a.txt"), "a\n").unwrap();
+        run_git(dir, &["add", "a.txt"]);
+        let sha = "1111111111111111111111111111111111111111";
+        run_git(
+            dir,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                sha,
+                "submod",
+            ],
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("a.txt", dir.join("link")).unwrap();
+            run_git(dir, &["add", "link"]);
+        }
+        run_git(dir, &["commit", "-m", "files, symlink, submodule"]);
+
+        assert!(extract(dir, Mode::Staged).unwrap().is_empty());
+    }
+
+    #[rstest]
+    fn staged_reports_unmerged_paths(git_repo: TempDir) {
+        let dir = git_repo.path();
+        let blob = |c: &str| {
+            fs::write(dir.join("blob.tmp"), c).unwrap();
+            let out = std::process::Command::new("git")
+                .args(["hash-object", "-w", "blob.tmp"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        for (stage, content) in [(1, "base\n"), (2, "ours\n"), (3, "theirs\n")] {
+            let info = format!("100644 {} {stage}\tconflict.txt\n", blob(content));
+            let mut child = std::process::Command::new("git")
+                .args(["update-index", "--index-info"])
+                .current_dir(dir)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), info.as_bytes()).unwrap();
+            assert!(child.wait().unwrap().success());
+        }
+
+        match extract(dir, Mode::Staged) {
+            Err(GitError::Git(m)) => assert!(m.contains("conflict.txt"), "{m}"),
+            other => panic!("expected an unmerged error, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn head_pointing_to_tree_object_fails(git_repo: TempDir) {
         let dir = git_repo.path();
         run_git(dir, &["commit", "--allow-empty", "-m", "empty"]);
 
@@ -704,11 +769,11 @@ mod tests {
         // git refuses to point a branch at a tree; a detached HEAD file can name any object.
         fs::write(dir.join(".git/HEAD"), format!("{tree_id}\n")).unwrap();
 
-        assert!(extract(dir, Mode::All).unwrap().is_empty());
+        assert!(matches!(extract(dir, Mode::All), Err(GitError::Git(_))));
     }
 
     #[rstest]
-    fn head_commit_missing_tree_handled(git_repo: TempDir) {
+    fn head_commit_missing_tree_fails(git_repo: TempDir) {
         let dir = git_repo.path();
         let file = dir.join("solo.txt");
         fs::write(&file, "content\n").unwrap();
@@ -721,9 +786,7 @@ mod tests {
         let tree_path = dir.join(".git/objects").join(prefix).join(suffix);
         fs::remove_file(tree_path).unwrap();
 
-        let hunks = extract(dir, Mode::All).unwrap();
-        assert_eq!(hunks.len(), 1);
-        assert_eq!(hunks[0].file, "solo.txt");
+        assert!(matches!(extract(dir, Mode::All), Err(GitError::Git(_))));
     }
 
     fn object_path(dir: &Path, hex: &str) -> PathBuf {

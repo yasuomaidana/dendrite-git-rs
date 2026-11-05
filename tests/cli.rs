@@ -297,7 +297,7 @@ fn skips_a_directory_it_cannot_list() {
 }
 
 #[test]
-fn tolerates_a_staged_entry_whose_object_is_missing() {
+fn reports_a_staged_entry_whose_object_is_missing() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
     git(dir, &["init", "-q"]);
@@ -312,8 +312,7 @@ fn tolerates_a_staged_entry_whose_object_is_missing() {
             &format!("100644,{ghost},ghost.txt"),
         ],
     );
-    let answer = hunks_request(&dir.display().to_string(), "staged");
-    assert!(answer["result"]["hunks"].is_array(), "{answer}");
+    assert_reports_git_error(dir, "staged");
 }
 
 #[rstest::fixture]
@@ -340,12 +339,18 @@ fn assert_lists_hunks(dir: &std::path::Path, mode: &str) {
     assert!(answer["result"]["hunks"].is_array(), "{answer}");
 }
 
+fn assert_reports_git_error(dir: &std::path::Path, mode: &str) {
+    let answer = hunks_request(&dir.display().to_string(), mode);
+    assert_eq!(answer["error"]["data"]["kind"], "git_error", "{answer}");
+    assert!(answer["result"].is_null(), "{answer}");
+}
+
 #[rstest::rstest]
 #[case::head_commit_missing("HEAD")]
 #[case::root_tree_missing("HEAD^{tree}")]
-fn copes_with_a_head_whose_objects_are_gone(committed_file_repo: TempDir, #[case] victim: &str) {
+fn fails_on_a_head_whose_objects_are_gone(committed_file_repo: TempDir, #[case] victim: &str) {
     destroy_object(committed_file_repo.path(), victim);
-    assert_lists_hunks(committed_file_repo.path(), "all");
+    assert_reports_git_error(committed_file_repo.path(), "all");
 }
 
 #[test]
