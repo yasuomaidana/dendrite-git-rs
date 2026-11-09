@@ -2,5 +2,29 @@
 name = "dendrite-git-rs"
 version = "0.1.0"
 edition = "2021"
+description = "Pure-Rust Git hunk extraction and dependency graph engine for Dendrite"
+license = "MIT"
+
+[lib]
+name = "dendrite_git"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dendrite-git"
+path = "src/main.rs"
 
 [dependencies]
+gix = { version = "0.90", default-features = false, features = ["sha1", "revision", "status", "basic"] }
+imara-diff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+dendrite-core-rs = { git = "https://github.com/yasuomaidana/dendrite-core-rs", version = "0.1.0" }
+rstest = "0.28.0"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
