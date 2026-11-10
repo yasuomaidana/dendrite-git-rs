@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Database access policy: `scripts/check-db-access.sh` and the CI job `db-access (diesel only)` fail when a manifest declares a database driver without Diesel, when sources use `rusqlite::`, `sqlx::` or `sea_orm::`, or when `sql_query` is called outside a `raw` module; exceptions go in `.github/db-access-allow.txt` with a reason (DGIT-18).
 - Pure zero-context Myers line diff hunk extraction in `hunk.rs` via `imara-diff`.
 - Support for `HunkKind` variants: `Modified`, `Added`, `Deleted`, `Binary`, and `Renamed`.
 - In-process Git repository inspection with `gitoxide` (`gix`) in `repo.rs` supporting `Mode::Staged` and `Mode::All`.
