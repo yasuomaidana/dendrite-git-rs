@@ -117,3 +117,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 dendrite allostasis gate
 ```
+
+## Database access
+
+Every database in this project goes through [Diesel](https://diesel.rs); this repository has none today.
+`scripts/check-db-access.sh` (job `db-access (diesel only)`, on every pull request and on pushes to develop and
+main) fails when a `Cargo.toml` declares `sqlx`, `rusqlite`, `sea-orm`, `mysql`, `mysql_async`, `postgres`,
+`tokio-postgres` or `libsql` without also declaring a `diesel` crate (`diesel-async` and `diesel-libsql` use those
+drivers as backends), when a source file uses `rusqlite::`, `sqlx::` or `sea_orm::`, or when `sql_query` is called
+outside a module named `raw`. An exception goes into `.github/db-access-allow.txt` as
+`manifest:<path/to/Cargo.toml> <reason>` or `source:<path prefix> <reason>`; an entry without a reason is an error.
+`scripts/tests/check-db-access.test.sh` tests the guard with passing and failing fixtures.
