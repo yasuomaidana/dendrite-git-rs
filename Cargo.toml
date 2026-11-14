@@ -21,7 +21,7 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-dendrite-core-rs = { git = "https://github.com/yasuomaidana/dendrite-core-rs", version = "0.1.0" }
+dendrite-core-rs = { git = "https://github.com/yasuomaidana/dendrite-core-rs", tag = "v0.1.0", version = "0.1.0" }
 rstest = "0.28.0"
 tempfile = "3"
 
